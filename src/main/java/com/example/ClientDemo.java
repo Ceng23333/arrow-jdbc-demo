@@ -33,7 +33,7 @@ public class ClientDemo {
     public static final String TABLE_NAME = "lakesoul_test_table";
     
     // 批处理相关参数
-    public static final int BATCH_SIZE = 1024;
+    public static final int BATCH_SIZE = 2048;
     public static final int BATCH_COUNT = 512;
     public static final int BATCH_STEP = BATCH_SIZE / 2;
     public static final float VALUE_RATIO = 1.5f;
