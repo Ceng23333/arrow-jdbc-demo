@@ -24,8 +24,8 @@ import static org.apache.arrow.flight.auth2.Auth2Constants.BEARER_PREFIX;
 
 public class ThroughputTest {
     // 连接参数
-    private static final String HOST = "localhost";
-    private static final int PORT = 50051;
+    private static final String HOST = "dapm-api.dmetasoul.com";
+    private static final int PORT = 443;
     
     // 测试参数
     private static final int CONCURRENT_CLIENTS = 8;  // 并发客户端数
@@ -89,13 +89,18 @@ public class ThroughputTest {
         int clientBatchCount = BATCH_COUNT * coprimeMultipliers[clientId % 4];  // 每个客户端使用不同的互质乘数
         
         try {
-            Location location = Location.forGrpcInsecure(HOST, PORT);
+//            Location location = Location.forGrpcInsecure(HOST, PORT);
+            Location location = Location.forGrpcTls(HOST, PORT);
             try (FlightClient flightClient = FlightClient.builder(allocator, location).build();
                  FlightSqlClient client = new FlightSqlClient(flightClient)) {
 
-//                long code = client.executeUpdate(String.format("CREATE TABLE throughput_test_%d (name STRING, id INT PRIMARY KEY, score FLOAT)", clientId), headerCallOption);
-                long code = client.executeUpdate(String.format("CREATE TABLE throughput_test_%d (name STRING, id INT, score FLOAT)", clientId), headerCallOption);
-                System.out.println("code: " + code);
+                String tableName = String.format("throughput_test_%d", clientId);
+                long code;
+                code = client.executeUpdate(String.format("DROP TABLE IF EXISTS %s", tableName), headerCallOption);
+                System.out.println("drop table return code: " + code);
+//                code = client.executeUpdate(String.format("CREATE TABLE IF NOT EXISTS %s (name STRING, id INT PRIMARY KEY, score FLOAT)", tableName), headerCallOption);
+                code = client.executeUpdate(String.format("CREATE TABLE IF NOT EXISTS %s  (name STRING, id INT, score FLOAT)", tableName), headerCallOption);
+                System.out.println("create table return code: " + code);
                 
                 // 获取表结构
                 FlightInfo primaryKeysInfo = client.getPrimaryKeys(
@@ -228,4 +233,4 @@ public class ThroughputTest {
         long rows;
         long bytes;
     }
-} 
+}

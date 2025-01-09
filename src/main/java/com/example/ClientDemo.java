@@ -1,5 +1,6 @@
 package com.example;
 
+import io.grpc.netty.NettyChannelBuilder;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.flight.sql.impl.FlightSql;
@@ -24,8 +25,11 @@ import static org.assertj.core.api.AssertionsForClassTypes.within;
 public class ClientDemo {
 
     // 连接参数
-    public static final String HOST = "localhost";
-    public static final int PORT = 50051;
+//    public static final String HOST = "localhost";
+//    public static final int PORT = 50051;
+    public static final String HOST = "dapm-api.dmetasoul.com";
+    public static final int PORT = 443;
+
     
     // 数据库相关参数
     public static final String CATALOG = "lakesoul";
@@ -47,7 +51,8 @@ public class ClientDemo {
         BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
 
         // 连接域名
-        final Location clientLocation = Location.forGrpcInsecure(HOST, PORT);
+//        final Location clientLocation = Location.forGrpcInsecure(HOST, PORT);
+        final Location clientLocation = Location.forGrpcTls(HOST, PORT);
 
         // 鉴权 Token Header
         String jwtToken = "";
@@ -55,10 +60,13 @@ public class ClientDemo {
         headers.insert(AUTHORIZATION_HEADER, BEARER_PREFIX + jwtToken);
         HeaderCallOption headerCallOption = new HeaderCallOption(headers);
 
+        NettyChannelBuilder channelBuilder = NettyChannelBuilder.forAddress("dapm.dmetasoul.com", 443);
+        channelBuilder.overrideAuthority("dapm-api.dmetasoul.com");
 
         // 流式写入数据
         try (FlightSqlClient flightSqlClient =
-                     new FlightSqlClient(FlightClient.builder(allocator, clientLocation).build())) {
+                     new FlightSqlClient(FlightGrpcUtils.createFlightClient(allocator, channelBuilder.build()))) {
+//                     new FlightSqlClient(FlightClient.builder(allocator, clientLocation).build())) {
 
             // 测试连接是否正常
             FlightInfo selectOneInfo = flightSqlClient.execute("SELECT 1", headerCallOption);
@@ -68,15 +76,11 @@ public class ClientDemo {
                     System.out.println("SELECT 1 result: " + root.getFieldVectors().get(0).getObject(0));
                 }
             }
-
-//            // 测试获取 catalog 列表
-//            FlightInfo catalogsInfo = flightSqlClient.getCatalogs(headerCallOption);
-//            try (FlightStream stream = flightSqlClient.getStream(catalogsInfo.getEndpoints().get(0).getTicket(), headerCallOption)) {
-//                VectorSchemaRoot root = stream.getRoot();
-//                while (stream.next()) {
-//                    System.out.println("Catalog: " + root.getFieldVectors().get(0).getObject(0));
-//                }
-//            }
+            long code;
+            code = flightSqlClient.executeUpdate(String.format("DROP TABLE IF EXISTS %s", TABLE_NAME), headerCallOption);
+            System.out.println("drop table return code: " + code);
+            code = flightSqlClient.executeUpdate(String.format("CREATE TABLE IF NOT EXISTS %s (name STRING, id INT PRIMARY KEY, score FLOAT)", TABLE_NAME), headerCallOption);
+            System.out.println("create table return code: " + code);
 
             // 测试获取指定 catalog 下的 schema 列表
             FlightInfo schemasInfo = flightSqlClient.getSchemas(CATALOG, null, headerCallOption);
