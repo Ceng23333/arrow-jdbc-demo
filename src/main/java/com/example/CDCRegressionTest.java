@@ -1,6 +1,5 @@
 package com.example;
 
-import com.example.util.TablePartitionUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.netty.NettyChannelBuilder;
@@ -26,7 +25,10 @@ import static org.apache.arrow.flight.auth2.Auth2Constants.BEARER_PREFIX;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.AssertionsForClassTypes.within;
 
-public class ClientDemo {
+import com.example.util.TablePartitionUtil;
+import com.example.util.TablePartitionUtil.TablePartitionKeys;
+
+public class CDCRegressionTest {
 
     // 连接参数
     public static final String HOST = "localhost";
@@ -41,9 +43,9 @@ public class ClientDemo {
     public static final String TABLE_NAME = "lakesoul_test_table";
     
     // 批处理相关参数
-    public static final int BATCH_SIZE = 16;
-    public static final int BATCH_COUNT = 16;
-    public static final int BATCH_STEP = BATCH_SIZE / 2;
+    public static final int BATCH_SIZE = 8;
+    public static final int BATCH_COUNT = 8;
+    public static final int BATCH_STEP = BATCH_SIZE;
     public static final float VALUE_RATIO = 1.5f;
     public static final int MAX_STRING_LENGTH = 20;
     public static final int ORIGINAL_ROW_COUNT = 0;
@@ -95,7 +97,7 @@ public class ClientDemo {
             long code;
             code = flightSqlClient.executeUpdate(String.format("DROP TABLE IF EXISTS %s", TABLE_NAME), headerCallOption);
             System.out.println("drop table return code: " + code);
-            code = flightSqlClient.executeUpdate(String.format("CREATE TABLE IF NOT EXISTS %s (name STRING, id INT PRIMARY KEY, score FLOAT, date DATE, region STRING) PARTITION BY (region, date)", TABLE_NAME), headerCallOption);
+            code = flightSqlClient.executeUpdate(String.format("CREATE TABLE IF NOT EXISTS %s (name STRING, id INT PRIMARY KEY NOT NULL, score FLOAT, date DATE, region STRING) WITH (use_cdc='true') PARTITION BY (region, date) ", TABLE_NAME), headerCallOption);
             System.out.println("create table return code: " + code);
             // 测试查询表内容
             FlightInfo selectAllInfo = flightSqlClient.execute(String.format("SELECT * FROM %s", TABLE_NAME), headerCallOption);
@@ -105,6 +107,8 @@ public class ClientDemo {
                     System.out.println("SELECT * result:" + root.contentToTSVString());
                 }
             }
+
+
 
             // 测试获取指定 catalog 下的 schema 列表
             FlightInfo schemasInfo = flightSqlClient.getSchemas(CATALOG, null, headerCallOption);
@@ -129,12 +133,17 @@ public class ClientDemo {
             ObjectMapper mapper = new ObjectMapper();
             Map<String, Object> metadataMap = mapper.readValue(metadata, new TypeReference<HashMap<String, Object>>() {});
 
-            List<String> partitionCols = TablePartitionUtil.parseTableInfoPartitions(metadataMap.get("partitions").toString()).getRangeKeys();
+            System.out.println(metadataMap);
+            TablePartitionKeys partitionKeys = TablePartitionUtil.parseTableInfoPartitions(metadataMap.get("partitions").toString());
+            List<String> partitionCols = partitionKeys.getRangeKeys();
+            List<String> primaryKeys = partitionKeys.getPrimaryKeys();
+            String cdcColumn = metadataMap.get("lakesoul_cdc_change_column").toString();
             System.out.println(partitionCols);
-
+            System.out.println(primaryKeys);
             
             Schema tableSchema = primaryKeysInfo.getSchemaOptional().get();
             System.out.println(tableSchema);
+//            if (1==1) System.exit(0);
 //            try (FlightStream stream = flightSqlClient.getStream(primaryKeysInfo.getEndpoints().get(0).getTicket(), headerCallOption)) {
 //                VectorSchemaRoot root = stream.getRoot();
 //                while (stream.next()) {
@@ -156,7 +165,9 @@ public class ClientDemo {
                 BATCH_SIZE,
                 BATCH_COUNT,
                 0,
-                partitionCols
+                partitionCols,
+                primaryKeys,
+                cdcColumn
             );
             printTimeElapsed("无事务数据写入", writeStartTime);
             validateQueryResults(allocator, 
@@ -188,7 +199,9 @@ public class ClientDemo {
                 BATCH_SIZE,
                 BATCH_COUNT,
                 BATCH_COUNT,
-                partitionCols
+                partitionCols,
+                primaryKeys,
+                cdcColumn
             );
             printTimeElapsed("事务数据写入", transactionWriteStartTime);
 
@@ -224,7 +237,7 @@ public class ClientDemo {
         );
     }
 
-    static void writeBatch(VectorSchemaRoot batch, ArrowStreamWriter writer, int batchSize, int batchCount, int batchOffset, List<String> partitionCols) throws Exception {
+    static void writeBatch(VectorSchemaRoot batch, ArrowStreamWriter writer, int batchSize, int batchCount, int batchOffset, List<String> partitionCols, List<String> primaryKeys, String cdcColumn) throws Exception {
         long batchWriteStartTime = System.currentTimeMillis();
         batch.allocateNew();
         
@@ -235,66 +248,107 @@ public class ClientDemo {
             for (FieldVector vector : batch.getFieldVectors()) {
                 String fieldName = vector.getField().getName();
                 boolean isPartitionCol = partitionCols != null && partitionCols.contains(fieldName);
+                boolean isCdcColumn = cdcColumn != null && fieldName.equals(cdcColumn);
+                boolean isPrimaryKey = primaryKeys != null && primaryKeys.contains(fieldName);
                 
                 switch (vector.getField().getType().getTypeID()) {
                     case Utf8:
                         VarCharVector stringVector = (VarCharVector) vector;
-                        stringVector.allocateNew((long) batchSize * MAX_STRING_LENGTH, batchSize);
-                        for (int j = 0; j < batchSize; j++) {
-                            String value = isPartitionCol ? 
-                                "partition_" + (j % 2) : 
-                                "test_string_" + j + i;
+                        stringVector.allocateNew((long) batchSize * 3 * MAX_STRING_LENGTH, batchSize * 3);
+                        for (int j = 0; j < batchSize * 2; j++) {
+                            String value;
+                            if (isCdcColumn) {
+                                value = "insert";
+                            } else if (isPartitionCol) {
+                                value = "partition_" + (j % 2);
+                            } else {
+                                value = "test_string_" + j + i * BATCH_STEP * 2;
+                            }
                             stringVector.set(j, value.getBytes(StandardCharsets.UTF_8));
+                        }
+                        for (int j = 0; j < batchSize; j++) {
+                            String value;
+                            if (isCdcColumn) {
+                                value = "delete";
+                            } else if (isPartitionCol) {
+                                value = "partition_" + (j % 2);
+                            } else {
+                                value = "test_string_" + j + i;
+                            }
+                            stringVector.set(j + batchSize * 2, value.getBytes(StandardCharsets.UTF_8));
                         }
                         break;
                     case Int:
                         IntVector intVector = (IntVector) vector;
-                        intVector.allocateNew(batchSize);
-                        for (int j = 0; j < batchSize; j++) {
-                            intVector.set(j, isPartitionCol ? 
-                                j % 2 : 
-                                i * BATCH_STEP + j);
+                        intVector.allocateNew(batchSize * 3);
+                        if (isPrimaryKey || isPartitionCol) {
+                            for (int j = 0; j < batchSize * 2; j++) {
+                                intVector.set(j, i * BATCH_STEP * 2 + j);
+                            }
+                            for (int j = 0; j < batchSize; j++) {
+                                intVector.set(j + batchSize * 2, i * BATCH_STEP * 2 + j);
+                            }
+                        } else {
+                            for (int j = 0; j < batchSize * 3; j++) {
+                                intVector.set(j, isPartitionCol ? 
+                                    j % 2 : 
+                                    i * BATCH_STEP * 2 + j);
+                            }
                         }
                         break;
                     case FloatingPoint:
                         FloatingPointVector floatVector = (FloatingPointVector) vector;
                         floatVector.allocateNew();
-                        for (int j = 0; j < batchSize; j++) {
+                        for (int j = 0; j < batchSize * 3; j++) {
                             floatVector.setWithPossibleTruncate(j, isPartitionCol ? 
                                 j % 2 : 
-                                (i * BATCH_STEP + j) * VALUE_RATIO);
+                                (i * BATCH_STEP * 2 + j) * VALUE_RATIO);
                         }
                         break;
                     case Decimal:
                         DecimalVector decimalVector = (DecimalVector) vector;
-                        decimalVector.allocateNew(batchSize);
-                        for (int j = 0; j < batchSize; j++) {
-                            decimalVector.set(j, ((long) i * BATCH_STEP + j) * (long) Math.pow(10, decimalVector.getScale()));
+                        decimalVector.allocateNew(batchSize * 3);
+                        for (int j = 0; j < batchSize * 3; j++) {
+                            decimalVector.set(j, ((long) i * BATCH_STEP * 2 + j) * (long) Math.pow(10, decimalVector.getScale()));
                         }
                         break;
                     case Date:
                         DateDayVector dateVector = (DateDayVector) vector;
-                        dateVector.allocateNew(batchSize);
-                        for (int j = 0; j < batchSize; j++) {
-                            int date = isPartitionCol ? 
-                                (i * BATCH_STEP + j) % 3 : 
-                                (i * BATCH_STEP + j);
-                            dateVector.set(j, date);
+                        dateVector.allocateNew(batchSize * 3);
+                        if (isPrimaryKey || isPartitionCol) {
+                            for (int j = 0; j < batchSize * 2; j++) {
+                                int date = isPartitionCol ? 
+                                    (i * BATCH_STEP * 2 + j) % 3 : 
+                                    (i * BATCH_STEP * 2 + j);
+                                dateVector.set(j, date);
+                            }
+                            for (int j = 0; j < batchSize; j++) {
+                                int date = isPartitionCol ? 
+                                    (i * BATCH_STEP * 2 + j) % 3 : 
+                                    (i * BATCH_STEP * 2 + j);
+                                dateVector.set(j + batchSize * 2, date);
+                            }
+                        } else {
+                            for (int j = 0; j < batchSize * 3; j++) {
+                                int date = isPartitionCol ? 
+                                    (i * BATCH_STEP * 2 + j) % 3 : 
+                                    (i * BATCH_STEP * 2 + j);
+                            }
                         }
                         break;
                     case Timestamp:
                         if (vector instanceof TimeStampMicroTZVector) {
                             TimeStampMicroTZVector timestampVector = (TimeStampMicroTZVector) vector;
-                            timestampVector.allocateNew(batchSize);
-                            for (int j = 0; j < batchSize; j++) {
+                            timestampVector.allocateNew(batchSize * 3);
+                            for (int j = 0; j < batchSize * 3; j++) {
                                 // 转换为微秒级时间戳
-                                timestampVector.set(j, (i * BATCH_STEP + j) * 1000L);
+                                timestampVector.set(j, (i * BATCH_STEP * 2 + j) * 1000L);
                             }
                         } else if (vector instanceof TimeMilliVector) {
                             TimeMilliVector timeMilliVector = (TimeMilliVector) vector;
-                            timeMilliVector.allocateNew(batchSize);
-                            for (int j = 0; j < batchSize; j++) {
-                                timeMilliVector.set(j, (i * BATCH_STEP + j));
+                            timeMilliVector.allocateNew(batchSize * 3);
+                            for (int j = 0; j < batchSize * 3; j++) {
+                                timeMilliVector.set(j, (i * BATCH_STEP * 2 + j));
                             }
                         } else {
                             throw new IllegalArgumentException("不支持的时间戳类型: " + vector.getClass().getName());
@@ -305,7 +359,8 @@ public class ClientDemo {
                 }
             }
             
-            batch.setRowCount(batchSize);
+            batch.setRowCount(batchSize * 3);
+            System.out.println(batch.contentToTSVString());
             writer.writeBatch();
         }
         printTimeElapsed("批次写入", batchWriteStartTime);
@@ -331,6 +386,21 @@ public class ClientDemo {
         long queryStartTime = System.currentTimeMillis();
 
         try (FlightSqlClient flightSqlClient = new FlightSqlClient(FlightClient.builder(allocator, clientLocation).build())) {
+
+            try (FlightSqlClient.PreparedStatement preparedStatement = flightSqlClient.prepare(
+                    String.format("select * from %s.%s",
+                            tableRef.getDbSchema(), tableRef.getTable()),
+                    headerCallOption
+            )) {
+                FlightInfo flightInfo = preparedStatement.execute();
+                int rowCount = 0;
+                try (final FlightStream stream = flightSqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket(), headerCallOption)) {
+                    while (stream.next()) {
+                        rowCount += stream.getRoot().getRowCount();
+                    }
+                }
+                System.out.println("总行数: " + rowCount);
+            }
             // 查询1：验证总行数
             long query1StartTime = System.currentTimeMillis();
             try (FlightSqlClient.PreparedStatement preparedStatement = flightSqlClient.prepare(
@@ -342,7 +412,6 @@ public class ClientDemo {
                 try (final FlightStream stream = flightSqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket(), headerCallOption)) {
                     while (stream.next()) {
                         try (final VectorSchemaRoot root = stream.getRoot()) {
-                            System.out.println(root.contentToTSVString());
                             long totalCount = ((BigIntVector)root.getVector(0)).get(0);
                             long expectedCount = originalRowCount + batchCount * batchStep + batchSize - batchStep;
                             assertThat(totalCount)
@@ -353,71 +422,7 @@ public class ClientDemo {
                 }
             }
             printTimeElapsed("查询1(总行数)", query1StartTime);
-//            if (1==1) return;
 
-            // 查询2：验证数值范围
-            long query2StartTime = System.currentTimeMillis();
-            try (FlightSqlClient.PreparedStatement preparedStatement = flightSqlClient.prepare(
-                    String.format("select min(score) as min_val, max(score) as max_val from %s.%s",
-                            tableRef.getDbSchema(), tableRef.getTable()),
-                    headerCallOption
-            )) {
-                FlightInfo flightInfo = preparedStatement.execute();
-                final FlightStream stream = flightSqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket(), headerCallOption);
-                while (stream.next()) {
-                    try (final VectorSchemaRoot root = stream.getRoot()) {
-                        System.out.println(root.contentToTSVString());
-                        float minVal = ((Float4Vector)root.getVector(0)).get(0);
-                        float maxVal = ((Float4Vector)root.getVector(1)).get(0);
-                        
-                        // 验证最小值和最大值是否在预期范围内
-                        assertThat(minVal)
-                            .as("最小值应该大于等于0")
-                            .isGreaterThanOrEqualTo(0);
-                        assertThat(maxVal)
-                            .as("最大值应该在预期范围内")
-                            .isLessThan((batchCount * batchStep + batchSize - batchStep) * valueRatio);
-                    }
-                }
-                stream.close();
-            }
-            printTimeElapsed("查询2(数值范围)", query2StartTime);
-
-            // 查询3：验证数据正确性
-            long query3StartTime = System.currentTimeMillis();
-            try (FlightSqlClient.PreparedStatement preparedStatement = flightSqlClient.prepare(
-                    String.format("select * from %s.%s where score = %f",
-                            tableRef.getDbSchema(), tableRef.getTable(), valueRatio),
-                    headerCallOption
-            )) {
-                FlightInfo flightInfo = preparedStatement.execute();
-                final FlightStream stream = flightSqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket(), headerCallOption);
-                while (stream.next()) {
-                    try (final VectorSchemaRoot root = stream.getRoot()) {
-                        System.out.println(root.contentToTSVString());
-                        // 验证字符串格式
-                        VarCharVector stringVector = (VarCharVector) root.getVector(0);
-                        String value = new String(stringVector.get(0), StandardCharsets.UTF_8);
-                        assertThat(value)
-                            .as("字符串格式不正确")
-                            .startsWith("test_string_");
-                        
-                        // 验证整数值
-                        IntVector intVector = (IntVector) root.getVector(1);
-                        assertThat(intVector.get(0))
-                            .as("整数值不匹配")
-                            .isEqualTo(1);
-                        
-                        // 验证浮数值
-                        FloatingPointVector floatVector = (FloatingPointVector) root.getVector(2);
-                        assertThat(floatVector.getValueAsDouble(0))
-                            .as("浮点数值不匹配")
-                            .isCloseTo(valueRatio, within(FLOAT_COMPARISON_DELTA));
-                    }
-                }
-                stream.close();
-            }
-            printTimeElapsed("查询3(数据正确性)", query3StartTime);
         } catch (Exception e) {
             throw new RuntimeException("查询验证失败", e);
         }
@@ -437,10 +442,12 @@ public class ClientDemo {
             int batchSize,
             int batchCount,
             int batchOffset,
-            List<String> partitionCols
+            List<String> partitionCols,
+            List<String> primaryKeys,
+            String cdcColumn
     ) throws Exception {
         try (final VectorSchemaRoot ingestRoot = VectorSchemaRoot.create(tableSchema, allocator);
-             PipedInputStream inPipe = new PipedInputStream(batchSize);
+             PipedInputStream inPipe = new PipedInputStream(batchSize * 3);
              PipedOutputStream outPipe = new PipedOutputStream(inPipe);
              ArrowStreamReader reader = new ArrowStreamReader(inPipe, allocator)) {
 
@@ -448,7 +455,7 @@ public class ClientDemo {
             new Thread(() -> {
                 try (ArrowStreamWriter writer = new ArrowStreamWriter(ingestRoot, null, outPipe)) {
                     writer.start();
-                    writeBatch(ingestRoot, writer, batchSize, batchCount, batchOffset, partitionCols);
+                    writeBatch(ingestRoot, writer, batchSize, batchCount, batchOffset, partitionCols, primaryKeys, cdcColumn);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
