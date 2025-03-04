@@ -100,7 +100,7 @@ public class QueryRegressionTest {
             try (FlightStream stream = flightSqlClient.getStream(schemasInfo.getEndpoints().get(0).getTicket(), headerCallOption)) {
                 VectorSchemaRoot root = stream.getRoot();
                 while (stream.next()) {
-                    System.out.println("Schema: " + root.getFieldVectors().get(1).getObject(0));
+                    System.out.println("Schema: " + root.contentToTSVString());
                 }
             }
 
@@ -109,7 +109,7 @@ public class QueryRegressionTest {
             try (FlightStream stream = flightSqlClient.getStream(tablesInfo.getEndpoints().get(0).getTicket(), headerCallOption)) {
                 VectorSchemaRoot root = stream.getRoot();
                 while (stream.next()) {
-                    System.out.println("Table: " + root.getFieldVectors().get(2).getObject(0));
+                    System.out.println("Table: " + root.contentToTSVString());
                 }
             }
 
